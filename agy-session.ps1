@@ -112,7 +112,7 @@ function Remove-Cred {
 function Get-CurrentAccount {
     $cred = Read-Cred
     if (-not $cred) { return $null }
-    return Get-IdentityFromAPI $cred.Blob
+    return Get-Identity $cred.Blob
 }
 
 function Get-SavedAccounts {
@@ -143,9 +143,34 @@ function Get-SavedAccounts {
 # Account Identity (Google userinfo API — same method agy uses)
 # ============================================================================
 
-function Get-IdentityFromAPI($blob) {
+function Get-Identity($blob) {
     try {
         $data = [Text.Encoding]::UTF8.GetString($blob) | ConvertFrom-Json
+        $activeRefresh = $data.token.refresh_token
+
+        # 1. Fast Path: Local fingerprint match (Zero Network)
+        if ($activeRefresh -and (Test-Path $SessionsDir)) {
+            foreach ($emailDir in Get-ChildItem $SessionsDir -Directory -ErrorAction SilentlyContinue) {
+                foreach ($subDir in Get-ChildItem $emailDir.FullName -Directory -ErrorAction SilentlyContinue) {
+                    $blobFile = Join-Path $subDir.FullName "credential.bin"
+                    $metaFile = Join-Path $subDir.FullName "meta.json"
+                    if ((Test-Path $blobFile) -and (Test-Path $metaFile)) {
+                        $savedBytes = Get-Content $blobFile -AsByteStream -ErrorAction SilentlyContinue
+                        if ($savedBytes) {
+                            $savedData = [Text.Encoding]::UTF8.GetString($savedBytes) | ConvertFrom-Json
+                            if ($savedData.token.refresh_token -eq $activeRefresh) {
+                                $meta = Get-Content $metaFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                                if ($meta) {
+                                    return [PSCustomObject]@{ Email = $meta.email; Name = $meta.name; Sub = $meta.sub }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        # 2. Slow Path: Network Fallback
         $token = $data.token.access_token
         $response = Invoke-RestMethod -Uri "https://openidconnect.googleapis.com/v1/userinfo" `
             -Headers @{Authorization="Bearer $token"} -TimeoutSec 5 -ErrorAction Stop
@@ -161,7 +186,7 @@ function Save-Current {
     $cred = Read-Cred
     if (-not $cred) { return $null }
 
-    $id = Get-IdentityFromAPI $cred.Blob
+    $id = Get-Identity $cred.Blob
     if (-not $id) { return $null }
 
     $targetDir = Join-Path $SessionsDir (Join-Path $id.Email $id.Sub)
@@ -175,7 +200,7 @@ function Save-Current {
 }
 
 function Invoke-Switch($matcher) {
-    Save-Current | Out-Null
+    $current = Save-Current
     $accounts = Get-SavedAccounts
 
     if ($accounts.Count -eq 0) {
@@ -214,8 +239,7 @@ function Invoke-Switch($matcher) {
 }
 
 function Invoke-Logout {
-    Save-Current | Out-Null
-    $current = Get-CurrentAccount
+    $current = Save-Current
     Remove-Cred
     if ($current) {
         Write-Output "Logged out: $($current.Email)  [$($current.Name)]"
@@ -260,8 +284,7 @@ function Write-Table($rows, $columns) {
 # ============================================================================
 
 function Invoke-List {
-    Save-Current | Out-Null
-    $current = Get-CurrentAccount
+    $current = Save-Current
     $accounts = Get-SavedAccounts
     if ($accounts.Count -eq 0) { Write-Output "No saved accounts."; return }
 
@@ -282,11 +305,10 @@ function Invoke-List {
 }
 
 function Invoke-Interactive {
-    $saved = Save-Current
-    if ($saved) { Write-Output "Synced: $($saved.Email)" }
+    $current = Save-Current
+    if ($current) { Write-Output "Synced: $($current.Email)" }
     else { Write-Output "Not logged in. Run 'agy' to login first."; return }
 
-    $current = Get-CurrentAccount
     $accounts = Get-SavedAccounts
     if ($accounts.Count -eq 0) {
         Write-Output "No saved accounts yet. Run 'agy-session' again after switching accounts."
