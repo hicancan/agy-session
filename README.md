@@ -37,13 +37,13 @@ agy-session
 agy-session list
 
 # 按 email 切换
-agy-session switch hicancan000@gmail.com
+agy-session switch user@example.com
 
 # 按 Google sub 前缀切换（全局搜索）
 agy-session switch 112546691
 
 # 模糊匹配 email
-agy-session switch hican
+agy-session switch user
 
 # 保存当前 session 并删除凭证，准备登录新号
 agy-session logout
