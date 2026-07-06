@@ -196,7 +196,9 @@ function Save-Current {
     $id = Get-Identity $cred.Blob
     if (-not $id) { return $null }
 
-    $targetDir = Join-Path $SessionsDir (Join-Path $id.Email $id.Sub)
+    $safeEmail = $id.Email -replace '[\\/:\*\?"<>\|]', '_'
+    $safeSub = $id.Sub -replace '[\\/:\*\?"<>\|]', '_'
+    $targetDir = Join-Path $SessionsDir (Join-Path $safeEmail $safeSub)
     New-Item -ItemType Directory -Force $targetDir | Out-Null
     $cred.Blob | Set-Content (Join-Path $targetDir "credential.bin") -AsByteStream
 
@@ -218,10 +220,11 @@ function Invoke-Switch($matcher) {
     $target = $null
 
     # Match: exact email, sub prefix, or fuzzy email
+    $escaped = [WildcardPattern]::Escape($matcher)
     foreach ($a in $accounts) {
         if ($a.Email -eq $matcher) { $target = $a; break }
         if ($a.Sub.StartsWith($matcher)) { $target = $a; break }
-        if ($a.Email -like "*$matcher*") { $target = $a; break }
+        if ($a.Email -like "*$escaped*") { $target = $a; break }
     }
 
     if (-not $target) {
