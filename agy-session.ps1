@@ -23,7 +23,12 @@ $SessionsDir = Join-Path $ProjectDir "sessions"
 # Windows Credential Manager (advapi32.dll) — x64 offset-based
 # ============================================================================
 
-Add-Type @"
+$CredManDll = Join-Path $env:APPDATA "agy-session"
+if (-not (Test-Path $CredManDll)) { New-Item -ItemType Directory -Force $CredManDll | Out-Null }
+$CredManDllPath = Join-Path $CredManDll "CredMan.dll"
+
+if (-not (Test-Path $CredManDllPath)) {
+    Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -84,7 +89,9 @@ public static class CredMan {
     [DllImport("advapi32")]
     static extern void CredFree(IntPtr b);
 }
-"@
+"@ -OutputAssembly $CredManDllPath
+}
+Add-Type -Path $CredManDllPath
 
 # ============================================================================
 # Credential Manager thin wrappers
@@ -210,23 +217,11 @@ function Invoke-Switch($matcher) {
 
     $target = $null
 
-    # Match: exact email
-    $m = @($accounts | Where-Object { $_.Email -eq $matcher })
-    if ($m.Count -eq 1) { $target = $m[0] }
-    elseif ($m.Count -gt 1) { Write-Output "Multiple sessions for $matcher."; exit 1 }
-
-    # Match: sub prefix
-    if (-not $target) {
-        $m = @($accounts | Where-Object { $_.Sub.StartsWith($matcher) })
-        if ($m.Count -eq 1) { $target = $m[0] }
-        elseif ($m.Count -gt 1) { Write-Output "Multiple matches for '$matcher'."; exit 1 }
-    }
-
-    # Match: fuzzy email
-    if (-not $target) {
-        $m = @($accounts | Where-Object { $_.Email -like "*$matcher*" })
-        if ($m.Count -eq 1) { $target = $m[0] }
-        elseif ($m.Count -gt 1) { Write-Output "Multiple emails match '$matcher'."; exit 1 }
+    # Match: exact email, sub prefix, or fuzzy email
+    foreach ($a in $accounts) {
+        if ($a.Email -eq $matcher) { $target = $a; break }
+        if ($a.Sub.StartsWith($matcher)) { $target = $a; break }
+        if ($a.Email -like "*$matcher*") { $target = $a; break }
     }
 
     if (-not $target) {
