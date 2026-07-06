@@ -12,11 +12,11 @@
 
 ## 这是什么 / What
 
-agy 只支持单账号登录。多个 Google 账号来回切换，需要手动删除 `oauth_creds.json`、重新 OAuth 登录。
+agy 只支持单账号登录。多个 Google 账号来回切换，需要手动打开 Windows 凭证管理器修改凭证，或者重新 OAuth 登录。
 
-`agy-session` 把这个流程变成一行命令。每次运行自动保存当前 token，切换账号瞬间完成。
+`agy-session` 把这个流程变成一行命令。每次运行自动捕获当前的 Windows 凭证，切换账号瞬间完成。
 
-agy supports only a single login. Switching between Google accounts means manually deleting `oauth_creds.json` and re-authenticating via OAuth. `agy-session` reduces this to a single command — auto-saves your current session, switches instantly.
+agy supports only a single login. Switching between Google accounts usually requires manually deleting Windows Credentials. `agy-session` reduces this to a single command — auto-saves your current session from the Windows Credential Manager, and switches instantly.
 
 ## 安装 / Install
 
@@ -60,31 +60,31 @@ agy-session logout
 ## 原理 / How It Works
 
 ```
-agy login (Google OAuth) → ~\.gemini\oauth_creds.json 生成
+agy login (Google OAuth) → 写入 Windows 凭证管理器 (gemini:antigravity)
      ↓
-agy-session  →  自动保存到 sessions\<email>\<google_sub>\oauth_creds.json
+agy-session  →  自动从系统读取并备份到 sessions\<email>\<google_sub>\credential.bin
      ↓
-agy-session switch xxx  →  覆盖 ~\.gemini\oauth_creds.json，完成切换
+agy-session switch xxx  →  覆盖 Windows 凭证管理器中的 (gemini:antigravity)，完成切换
 ```
 
-- **自动保存** — 每次运行都持久化当前 session
-- **自动覆盖** — 同 email + 同 Google sub 自动覆盖，始终最新
-- **google_accounts.json 同步** — 切换时自动更新 active 字段
+- **无文件机制** — agy-session 深入底层调用 `advapi32.dll` 拦截凭证
+- **自动保存** — 每次运行都持久化当前凭证
+- **极速热加载** — 使用内存级的 `CredMan.dll` 缓存，消除 C# 编译延迟
 - **自动清理** — logout 自动保存 + 删除，为登录新号准备
 
+- **File-less Architecture** — Interacts natively with Windows Credential Vault via `advapi32.dll`
 - **Auto-save** — persists current session on every invocation
-- **Auto-overwrite** — same email + same Google sub sessions overwritten, always fresh
-- **google_accounts.json sync** — updates active field on switch
+- **Microsecond Cold-starts** — Uses pre-compiled DLL caching for zero-delay P/Invoke
 - **Auto-cleanup** — logout saves + deletes, ready for new login
 
 ## 与 Codex 的对比 / vs Codex
 
 | | Codex | Anti-Gravity (agy) |
 |---|---|---|
-| 凭证文件 | `~\.codex\auth.json` | `~\.gemini\oauth_creds.json` |
+| 凭证机制 | 本地文件 (`~\.codex\auth.json`) | Windows 凭证管理器 (`gemini:antigravity`) |
 | 唯一标识 | `account_id` (UUID) | `sub` (Google 数字 ID) |
-| 加密方式 | JWT (OpenAI) | JWT (Google OAuth2) |
-| Token 刷新 | codex 自动管理 | refresh_token 自动续期 |
+| 加密方式 | JWT (OpenAI) | Windows 系统级加密 (DPAPI) |
+| Token 刷新 | codex 自动管理 | Google OAuth2 refresh_token 自动续期 |
 | 切换工具 | `codex-session` | `agy-session` |
 
 ## 安全 / Security
