@@ -98,6 +98,25 @@ public static class CredMan {
 Add-Type -Path $CredManDllPath
 
 # ============================================================================
+# Concurrency Management
+# ============================================================================
+
+function Invoke-WithLock([string]$MutexName, [int]$TimeoutMs, [scriptblock]$Action) {
+    $mutex = $null
+    $lockAcquired = $false
+    $createdNew = $false
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, $MutexName, [ref]$createdNew)
+        $lockAcquired = $mutex.WaitOne($TimeoutMs)
+        if (-not $lockAcquired) { throw "[Fatal Error] Failed to acquire lock '$MutexName' within timeout." }
+        return & $Action
+    } finally {
+        if ($lockAcquired) { $mutex.ReleaseMutex() }
+        if ($mutex) { $mutex.Dispose() }
+    }
+}
+
+# ============================================================================
 # Credential Manager thin wrappers
 # ============================================================================
 
@@ -109,7 +128,8 @@ function Read-Cred {
 }
 
 function Write-Cred($blob) {
-    [CredMan]::Write($CredTarget, "antigravity", $blob) | Out-Null
+    $result = [CredMan]::Write($CredTarget, "antigravity", $blob)
+    if (-not $result) { throw "[Fatal Error] Failed to write to Windows Credential Manager." }
 }
 
 function Remove-Cred {
@@ -211,12 +231,7 @@ function Save-Current {
     $targetDir = Join-Path $SessionsDir (Join-Path $safeEmail $safeSub)
     New-Item -ItemType Directory -Force $targetDir | Out-Null
 
-    $mutex = $null
-    $createdNew = $false
-    try {
-        $mutex = [System.Threading.Mutex]::new($false, "Global\AgySessionMutex", [ref]$createdNew)
-        if (-not $mutex.WaitOne(5000)) { throw "[Fatal Error] Failed to acquire global lock for state mutation." }
-        
+    Invoke-WithLock "Local\AgySessionMutex" 15000 {
         $credTmp = Join-Path $targetDir "credential.tmp.bin"
         [System.IO.File]::WriteAllBytes($credTmp, $cred.Blob)
         Move-Item $credTmp (Join-Path $targetDir "credential.bin") -Force
@@ -226,9 +241,6 @@ function Save-Current {
         $metaTmp = Join-Path $targetDir "meta.tmp.json"
         [System.IO.File]::WriteAllText($metaTmp, ($meta | ConvertTo-Json -Compress))
         Move-Item $metaTmp (Join-Path $targetDir "meta.json") -Force
-    } finally {
-        if ($lockAcquired) { $mutex.ReleaseMutex() }
-        if ($mutex) { $mutex.Dispose() }
     }
 
     return [PSCustomObject]@{ Email = $id.Email; Name = $id.Name; Sub = $id.Sub }
@@ -258,18 +270,8 @@ function Invoke-Switch($matcher) {
         exit 1
     }
 
-    $mutex = $null
-    $lockAcquired = $false
-    $createdNew = $false
-    try {
-        $mutex = [System.Threading.Mutex]::new($false, "Local\AgySessionMutex", [ref]$createdNew)
-        $lockAcquired = $mutex.WaitOne(15000)
-        if (-not $lockAcquired) { throw "[Fatal Error] Failed to acquire local lock for state mutation." }
-        
+    Invoke-WithLock "Local\AgySessionMutex" 15000 {
         Write-Cred ([System.IO.File]::ReadAllBytes($target.BlobPath))
-    } finally {
-        if ($lockAcquired) { $mutex.ReleaseMutex() }
-        if ($mutex) { $mutex.Dispose() }
     }
     Write-Output "Switched to: $($target.Email)  [$($target.Name)]  (sub=$($target.Sub))"
 }
