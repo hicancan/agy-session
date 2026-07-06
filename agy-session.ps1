@@ -52,7 +52,11 @@ public static class CredMan {
     }
 
     public static bool Write(string target, string userName, byte[] blob) {
+        if (IntPtr.Size != 8) throw new Exception("[Fatal Error] agy-session requires 64-bit architecture.");
         IntPtr p = Marshal.AllocHGlobal(80);
+        Marshal.WriteIntPtr(p, O_TARGET, IntPtr.Zero);
+        Marshal.WriteIntPtr(p, O_BLOB, IntPtr.Zero);
+        Marshal.WriteIntPtr(p, O_USER, IntPtr.Zero);
         try {
             Marshal.WriteInt32(p, O_FLAGS, 0);
             Marshal.WriteInt32(p, O_TYPE, 1);
@@ -123,23 +127,24 @@ function Get-CurrentAccount {
 }
 
 function Get-SavedAccounts {
-    $accounts = @()
-    if (-not (Test-Path $SessionsDir)) { return $accounts }
-    foreach ($emailDir in Get-ChildItem $SessionsDir -Directory -ErrorAction SilentlyContinue) {
+    if (-not (Test-Path $SessionsDir)) { return @() }
+    $accounts = foreach ($emailDir in Get-ChildItem $SessionsDir -Directory -ErrorAction SilentlyContinue) {
         foreach ($subDir in Get-ChildItem $emailDir.FullName -Directory -ErrorAction SilentlyContinue) {
             $metaFile = Join-Path $subDir.FullName "meta.json"
             $blobFile = Join-Path $subDir.FullName "credential.bin"
             if ((Test-Path $metaFile) -and (Test-Path $blobFile)) {
                 try {
-                    $meta = Get-Content $metaFile -Raw | ConvertFrom-Json
-                    $accounts += [PSCustomObject]@{
+                    $meta = [System.IO.File]::ReadAllText($metaFile) | ConvertFrom-Json
+                    [PSCustomObject]@{
                         Email    = $meta.email
                         Name     = $meta.name
                         Sub      = $meta.sub
                         SavedAt  = $meta.saved_at
                         BlobPath = $blobFile
                     }
-                } catch {}
+                } catch {
+                    throw "[Fatal Error] State synchronization failed: Unable to parse JSON sequence at ($metaFile). Details: $($_.Exception.Message)"
+                }
             }
         }
     }
@@ -162,12 +167,15 @@ function Get-Identity($blob) {
                     $blobFile = Join-Path $subDir.FullName "credential.bin"
                     $metaFile = Join-Path $subDir.FullName "meta.json"
                     if ((Test-Path $blobFile) -and (Test-Path $metaFile)) {
-                        $savedBytes = Get-Content $blobFile -AsByteStream -ErrorAction SilentlyContinue
-                        if ($savedBytes) {
-                            $savedData = [Text.Encoding]::UTF8.GetString($savedBytes) | ConvertFrom-Json
-                            if ($savedData.token.refresh_token -eq $activeRefresh) {
-                                $meta = Get-Content $metaFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-                                if ($meta) {
+                        $metaText = [System.IO.File]::ReadAllText($metaFile)
+                        $meta = $metaText | ConvertFrom-Json
+                        if ($meta.refresh_token -and $meta.refresh_token -eq $activeRefresh) {
+                            return [PSCustomObject]@{ Email = $meta.email; Name = $meta.name; Sub = $meta.sub }
+                        } elseif (-not $meta.refresh_token) {
+                            $savedBytes = [System.IO.File]::ReadAllBytes($blobFile)
+                            if ($savedBytes) {
+                                $savedData = [Text.Encoding]::UTF8.GetString($savedBytes) | ConvertFrom-Json
+                                if ($savedData.token.refresh_token -eq $activeRefresh) {
                                     return [PSCustomObject]@{ Email = $meta.email; Name = $meta.name; Sub = $meta.sub }
                                 }
                             }
@@ -182,7 +190,9 @@ function Get-Identity($blob) {
         $response = Invoke-RestMethod -Uri "https://openidconnect.googleapis.com/v1/userinfo" `
             -Headers @{Authorization="Bearer $token"} -TimeoutSec 5 -ErrorAction Stop
         return [PSCustomObject]@{ Email = $response.email; Name = $response.name; Sub = $response.sub }
-    } catch { return $null }
+    } catch {
+        throw "[Fatal Error] Identity resolution failed or network timeout occurred. Details: $($_.Exception.Message)"
+    }
 }
 
 # ============================================================================
@@ -200,10 +210,26 @@ function Save-Current {
     $safeSub = $id.Sub -replace '[\\/:\*\?"<>\|]', '_'
     $targetDir = Join-Path $SessionsDir (Join-Path $safeEmail $safeSub)
     New-Item -ItemType Directory -Force $targetDir | Out-Null
-    $cred.Blob | Set-Content (Join-Path $targetDir "credential.bin") -AsByteStream
 
-    $meta = @{ email = $id.Email; name = $id.Name; sub = $id.Sub; saved_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') }
-    ($meta | ConvertTo-Json) | Set-Content (Join-Path $targetDir "meta.json") -NoNewline
+    $mutex = $null
+    $createdNew = $false
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, "Global\AgySessionMutex", [ref]$createdNew)
+        if (-not $mutex.WaitOne(5000)) { throw "[Fatal Error] Failed to acquire global lock for state mutation." }
+        
+        $credTmp = Join-Path $targetDir "credential.tmp.bin"
+        [System.IO.File]::WriteAllBytes($credTmp, $cred.Blob)
+        Move-Item $credTmp (Join-Path $targetDir "credential.bin") -Force
+
+        $data = [Text.Encoding]::UTF8.GetString($cred.Blob) | ConvertFrom-Json
+        $meta = @{ email = $id.Email; name = $id.Name; sub = $id.Sub; saved_at = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); refresh_token = $data.token.refresh_token }
+        $metaTmp = Join-Path $targetDir "meta.tmp.json"
+        [System.IO.File]::WriteAllText($metaTmp, ($meta | ConvertTo-Json -Compress))
+        Move-Item $metaTmp (Join-Path $targetDir "meta.json") -Force
+    } finally {
+        if ($lockAcquired) { $mutex.ReleaseMutex() }
+        if ($mutex) { $mutex.Dispose() }
+    }
 
     return [PSCustomObject]@{ Email = $id.Email; Name = $id.Name; Sub = $id.Sub }
 }
@@ -232,7 +258,19 @@ function Invoke-Switch($matcher) {
         exit 1
     }
 
-    Write-Cred (Get-Content $target.BlobPath -AsByteStream)
+    $mutex = $null
+    $lockAcquired = $false
+    $createdNew = $false
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, "Local\AgySessionMutex", [ref]$createdNew)
+        $lockAcquired = $mutex.WaitOne(15000)
+        if (-not $lockAcquired) { throw "[Fatal Error] Failed to acquire local lock for state mutation." }
+        
+        Write-Cred ([System.IO.File]::ReadAllBytes($target.BlobPath))
+    } finally {
+        if ($lockAcquired) { $mutex.ReleaseMutex() }
+        if ($mutex) { $mutex.Dispose() }
+    }
     Write-Output "Switched to: $($target.Email)  [$($target.Name)]  (sub=$($target.Sub))"
 }
 
@@ -287,9 +325,8 @@ function Invoke-List {
     if ($accounts.Count -eq 0) { Write-Output "No saved accounts."; return }
 
     $curKey = if ($current) { "$($current.Email)|$($current.Sub)" } else { "" }
-    $rows = @()
-    foreach ($a in $accounts) {
-        $rows += [PSCustomObject]@{
+    $rows = foreach ($a in $accounts) {
+        [PSCustomObject]@{
             A       = if ("$($a.Email)|$($a.Sub)" -eq $curKey) { "*" } else { "" }
             Email   = $a.Email
             Name    = $a.Name

@@ -1,2 +1,8 @@
 # Session data — contains tokens, never commit
 /sessions/
+
+# Defense in depth: strictly ignore credential and temp files globally
+auth.json
+credential.bin
+meta.json
+*.tmp
